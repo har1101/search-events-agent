@@ -39,6 +39,7 @@
 | API統合 | AgentCore Gateway |
 | スケジュール実行 | Amazon EventBridge Scheduler |
 | 通知 | LINE Messaging API |
+| IaC（Infrastructure as Code） | AWS CDK (TypeScript) |
 
 ---
 
@@ -680,6 +681,430 @@ goal-management-app/
 
 ---
 
+## 10. Observability（監視・観測性）
+
+### 10.1 概要
+
+Amazon CloudWatch GenAI Observabilityを使用し、エージェントとAPI全体の監視を実現します。
+
+**主要機能:**
+- Model Invocationsダッシュボード（トークン使用量、レイテンシ）
+- AgentCore agentsダッシュボード（エージェント実行フロー可視化）
+- エンドツーエンドのプロンプトトレーシング
+- Application Signals / Alarms統合
+
+### 10.2 アーキテクチャ
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    CloudWatch GenAI Observability           │
+├─────────────────────────────────────────────────────────────┤
+│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐         │
+│  │ Model       │  │ AgentCore   │  │ Transaction │         │
+│  │ Invocations │  │ Agents      │  │ Search      │         │
+│  │ Dashboard   │  │ Dashboard   │  │ (Traces)    │         │
+│  └─────────────┘  └─────────────┘  └─────────────┘         │
+└─────────────────────────────────────────────────────────────┘
+        ▲                   ▲                   ▲
+        │                   │                   │
+   OTEL Metrics        OTEL Traces         OTEL Logs
+        │                   │                   │
+┌───────┴───────────────────┴───────────────────┴────────────┐
+│                    ADOT SDK (自動収集)                      │
+├─────────────────────────────────────────────────────────────┤
+│  AgentCore Runtime    │    Lambda Functions    │   API GW  │
+│  (Strands Agents)     │    (REST API)          │           │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 10.3 収集メトリクス
+
+#### エージェントメトリクス（自動収集）
+
+| メトリクス | 説明 | 用途 |
+|-----------|------|------|
+| `inputTokens` | 入力トークン数 | コスト管理 |
+| `outputTokens` | 出力トークン数 | コスト管理 |
+| `totalTokens` | 合計トークン数 | 使用量監視 |
+| `invocation_count` | 呼び出し回数 | 負荷把握 |
+| `latency_p50/p90/p99` | レイテンシ分布 | パフォーマンス |
+| `error_rate` | エラー率 | 信頼性監視 |
+| `tool_success_rate` | ツール成功率 | 品質監視 |
+
+#### ログ設定
+
+| ログタイプ | ロググループ | 内容 |
+|-----------|-------------|------|
+| Runtime Logs | `/aws/bedrock-agentcore/runtimes/{agent-id}/runtime-logs` | アプリケーション出力 |
+| OTEL Logs | `/aws/bedrock-agentcore/runtimes/{agent-id}/otel-rt-logs` | 構造化ログ（トレースリンク付き） |
+| Lambda Logs | `/aws/lambda/{function-name}` | API処理ログ |
+
+### 10.4 Strands Agents統合設定
+
+```python
+# agent/goal_agent/main.py
+
+from strands import Agent
+from strands.models.bedrock import BedrockModel
+import logging
+
+# ログ設定
+logging.getLogger("strands").setLevel(logging.INFO)
+logging.basicConfig(
+    format="%(levelname)s | %(name)s | %(message)s",
+    handlers=[logging.StreamHandler()]
+)
+
+# エージェント作成時にtrace_attributesを設定
+agent = Agent(
+    model=BedrockModel(model_id=MODEL_ID),
+    tools=[...],
+    system_prompt=SYSTEM_PROMPT,
+    trace_attributes={
+        "user.id": actor_id,           # ユーザー識別（ハッシュ化）
+        "session.id": session_id,      # セッション追跡
+        "agent.type": "goal_agent",    # エージェント種別
+        "tags": ["goal-management", "production"]
+    }
+)
+```
+
+### 10.5 環境変数設定
+
+```bash
+# AgentCore Runtime デプロイ時の環境変数
+AGENT_OBSERVABILITY_ENABLED=true
+OTEL_PYTHON_DISTRO=aws_distro
+OTEL_PYTHON_CONFIGURATOR=aws_configurator
+OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+OTEL_TRACES_EXPORTER=otlp
+OTEL_RESOURCE_ATTRIBUTES=service.name=goal-management-agent
+```
+
+### 10.6 アラーム設定
+
+| アラーム名 | 条件 | 重要度 |
+|-----------|------|--------|
+| HighErrorRate | エラー率 > 5% (5分間) | Critical |
+| HighLatency | P99レイテンシ > 30秒 | Warning |
+| TokenBudgetAlert | 日次トークン使用量 > 予算80% | Warning |
+| ToolFailureRate | ツール失敗率 > 10% | Critical |
+
+### 10.7 監査証跡
+
+#### 操作ログ構造
+
+```json
+{
+  "timestamp": "2025-01-05T10:30:00Z",
+  "event_type": "goal_created",
+  "actor_id": "user_abc123def456",
+  "session_id": "sess_20250105_103000_a1b2c3d4",
+  "resource": {
+    "type": "goal",
+    "id": "550e8400-e29b-41d4-a716-446655440000"
+  },
+  "action": "create",
+  "details": {
+    "title": "今年はアウトプット増やす",
+    "milestone_count": 2
+  },
+  "trace_id": "1-abc123-def456789"
+}
+```
+
+#### CloudWatch Logs Insightsクエリ例
+
+```sql
+-- ユーザー別操作履歴
+fields @timestamp, actor_id, event_type, resource.type, action
+| filter actor_id = 'user_abc123def456'
+| sort @timestamp desc
+| limit 100
+
+-- エラー分析
+fields @timestamp, @message, trace_id
+| filter @message like /ERROR/
+| stats count() by bin(1h)
+```
+
+---
+
+## 11. マルチテナント設計
+
+### 11.1 概要
+
+複数ユーザーが同一システムを利用する際のデータ分離とセキュリティ境界を定義します。
+
+**分離対象:**
+- AgentCore Memory（会話履歴、ユーザー嗜好）
+- AgentCore Identity（OAuth2トークン）
+- AgentCore Gateway経由のツール呼び出し
+- Aurora DSQLデータ
+
+### 11.2 ユーザー識別子の設計
+
+#### ActorID（ユーザー識別子）
+
+```python
+import hashlib
+
+def generate_actor_id(cognito_sub: str) -> str:
+    """
+    Cognito subからActorIDを生成（決定論的）
+
+    - 同じユーザーは常に同じactor_idを取得
+    - ハッシュ化でプライバシーを保護
+    - クライアントからの指定は受け付けない
+    """
+    hash_val = hashlib.sha256(cognito_sub.encode()).hexdigest()[:16]
+    return f"user_{hash_val}"
+```
+
+**命名規則:**
+- 形式: `user_{hash16}`
+- 例: `user_abc123def456ghij`
+- 制約: 英数字 + `_`、256文字以内
+
+#### SessionID（セッション識別子）
+
+```python
+from datetime import datetime
+from uuid import uuid4
+from zoneinfo import ZoneInfo
+
+def generate_session_id() -> str:
+    """
+    セッションIDを生成（リクエストごとに一意）
+    """
+    timestamp = datetime.now(ZoneInfo('Asia/Tokyo')).strftime('%Y%m%d_%H%M%S')
+    uuid_short = uuid4().hex[:8]
+    return f"sess_{timestamp}_{uuid_short}"
+```
+
+**命名規則:**
+- 形式: `sess_{timestamp}_{uuid8}`
+- 例: `sess_20250105_143022_a1b2c3d4`
+
+### 11.3 AgentCore Memory分離設計
+
+#### Namespace構造
+
+```
+Memory Resource (共有)
+└── Namespace (ユーザー分離)
+    ├── /strategies/goals/{actor_id}/all          # 目標情報
+    ├── /strategies/progress/{actor_id}/all       # 進捗情報
+    ├── /strategies/context/{actor_id}/{session_id}  # セッションコンテキスト
+    └── /preferences/{actor_id}                   # ユーザー嗜好
+```
+
+#### 実装例
+
+```python
+from bedrock_agentcore.memory.integrations.strands.config import (
+    AgentCoreMemoryConfig, RetrievalConfig
+)
+from bedrock_agentcore.memory.integrations.strands.session_manager import (
+    AgentCoreMemorySessionManager
+)
+
+def create_user_memory_config(actor_id: str, session_id: str) -> AgentCoreMemoryConfig:
+    """ユーザー別のMemory設定を作成"""
+    return AgentCoreMemoryConfig(
+        memory_id=os.environ.get("AGENTCORE_MEMORY_ID"),
+        session_id=session_id,
+        actor_id=actor_id,
+        retrieval_config={
+            # ユーザーの目標情報（全セッション共通）
+            f"/strategies/goals/{actor_id}/all": RetrievalConfig(
+                top_k=10,
+                relevance_score=0.5
+            ),
+            # ユーザーの進捗情報（全セッション共通）
+            f"/strategies/progress/{actor_id}/all": RetrievalConfig(
+                top_k=5,
+                relevance_score=0.4
+            ),
+            # このセッション固有のコンテキスト
+            f"/strategies/context/{actor_id}/{session_id}": RetrievalConfig(
+                top_k=3,
+                relevance_score=0.3
+            )
+        }
+    )
+```
+
+### 11.4 AgentCore Identity トークン分離
+
+#### ユーザー別トークン管理
+
+```
+Token Vault構造:
+arn:aws:bedrock-agentcore:{region}:{account}:token-vault/default/
+  oauth2credentialprovider/
+    google-calendar-provider/
+      {workload_name}#user_abc123/    ← User A のトークン
+        access_token: "ya29.xxxxx"
+        refresh_token: "1//xxxxx"
+      {workload_name}#user_def456/    ← User B のトークン
+        access_token: "ya29.yyyyy"
+        refresh_token: "1//yyyyy"
+```
+
+#### トークン取得フロー
+
+```python
+from bedrock_agentcore.services.identity import IdentityClient
+
+async def get_user_oauth_token(
+    provider_name: str,
+    scopes: list[str],
+    workload_identity_token: str
+) -> str:
+    """
+    ユーザースコープのOAuth2トークンを取得
+
+    - Token VaultはWorkload Identity Tokenに含まれるユーザー情報で
+      自動的にトークンをスコープ化
+    - 他ユーザーのトークンにはアクセス不可
+    """
+    identity_client = IdentityClient(region="ap-northeast-1")
+
+    return await identity_client.get_token(
+        provider_name=provider_name,
+        scopes=scopes,
+        agent_identity_token=workload_identity_token,
+        auth_flow="USER_FEDERATION"
+    )
+```
+
+### 11.5 Gateway経由ツール呼び出しの分離
+
+#### リクエストにユーザーコンテキストを含める
+
+```python
+async def call_calendar_tool(
+    actor_id: str,
+    session_id: str,
+    access_token: str,
+    **kwargs
+):
+    """Gateway経由でカレンダーツールを呼び出し"""
+    return await call_gateway_tool(
+        "get_calendar_events",
+        arguments={
+            "access_token": access_token,
+            "user_id": actor_id,      # ← ユーザー識別
+            "session_id": session_id, # ← セッション追跡
+            **kwargs
+        }
+    )
+```
+
+#### Lambda側でのユーザー検証
+
+```python
+def get_calendar_events(
+    access_token: str,
+    user_id: str,
+    session_id: str,
+    **kwargs
+) -> dict:
+    """ユーザーIDを含むカレンダーイベント取得"""
+    # 監査ログ記録
+    logger.info(
+        "Calendar access",
+        extra={
+            "user_id": user_id,
+            "session_id": session_id,
+            "token_hash": hashlib.sha256(access_token.encode()).hexdigest()[:16]
+        }
+    )
+    # API呼び出し...
+```
+
+### 11.6 認証・認可フロー全体図
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                        認証・認可フロー                           │
+└──────────────────────────────────────────────────────────────────┘
+
+1. ユーザー認証（Cognito）
+   User → Cognito → JWT (sub: cognito_user_id)
+                           │
+2. ActorID生成              │
+   │                       ▼
+   │              actor_id = hash(cognito_sub)
+   │                       │
+3. AgentCore Runtime       │
+   │                       ▼
+   │              ┌─────────────────────┐
+   │              │ RequestContext      │
+   │              │ - user_id: actor_id │
+   │              │ - session_id: sess_*│
+   │              └─────────────────────┘
+   │                       │
+4. Memory分離              │
+   │                       ▼
+   │              Namespace: /strategies/*/{actor_id}/*
+   │                       │
+5. Identity分離            │
+   │                       ▼
+   │              Token Vault: .../{workload}#{actor_id}
+   │                       │
+6. Gateway呼び出し         │
+   │                       ▼
+   │              Lambda: user_id, session_id をログ記録
+   │                       │
+7. Aurora DSQL             │
+                           ▼
+                  WHERE owner_sub = cognito_sub
+```
+
+### 11.7 セキュリティチェックリスト
+
+#### 実装時の必須事項
+
+- [ ] ActorIDはCognito subから生成（クライアント指定不可）
+- [ ] SessionIDはリクエストごとに一意生成
+- [ ] Memory NamespaceにactorIdを必ず含める
+- [ ] Token VaultアクセスはWorkload Identity Token経由
+- [ ] Gateway呼び出しにuser_id/session_idを含める
+- [ ] Lambda側でトークンハッシュを監査ログに記録
+- [ ] Aurora DSQLクエリはowner_subでフィルタリング
+
+#### 禁止事項
+
+- [ ] クライアントからのactor_id/session_id指定を受け付けない
+- [ ] ログにアクセストークン本体を記録しない
+- [ ] 他ユーザーのNamespaceパスを構築しない
+- [ ] JWTの検証をスキップしない
+
+### 11.8 データリーク防止
+
+#### 多層防御アーキテクチャ
+
+```
+Layer 1: API Gateway + Cognito Authorizer
+  └─ JWT検証、有効期限チェック
+
+Layer 2: Lambda / AgentCore Runtime
+  └─ actor_idをJWTのsubから決定（クライアント指定拒否）
+
+Layer 3: AgentCore Memory
+  └─ Namespaceパターンでデータ分離
+
+Layer 4: AgentCore Identity
+  └─ Workload Identity TokenでUser Scoping
+
+Layer 5: Aurora DSQL
+  └─ owner_subカラムでRow Level Security
+```
+
+---
+
 ## 付録A: 目標詳細化の質問テンプレート
 
 エージェントが粒度の粗い目標を詳細化する際に使用する質問項目。
@@ -746,14 +1171,42 @@ Agent: 「登録しました！Googleカレンダーにも期限を追加しま�
 
 ## 付録B: 環境変数・シークレット
 
+### B.1 基本設定
+
 | 名前 | 説明 | 保存場所 |
 |------|------|---------|
 | `COGNITO_USER_POOL_ID` | Cognito User Pool ID | 環境変数 |
 | `COGNITO_CLIENT_ID` | Cognito App Client ID | 環境変数 |
 | `DSQL_HOST` | Aurora DSQL エンドポイント | 環境変数 |
 | `DSQL_USER` | DSQLユーザー名 | 環境変数 |
+| `BEDROCK_MODEL_ID` | Bedrock モデルID | 環境変数 |
+
+### B.2 外部サービス連携
+
+| 名前 | 説明 | 保存場所 |
+|------|------|---------|
 | `GOOGLE_CLIENT_ID` | Google OAuth2 クライアントID | Secrets Manager |
 | `GOOGLE_CLIENT_SECRET` | Google OAuth2 シークレット | AgentCore Identity |
 | `LINE_CHANNEL_ACCESS_TOKEN` | LINE Channel Access Token | Secrets Manager |
 | `LINE_CHANNEL_SECRET` | LINE Channel Secret | Secrets Manager |
-| `BEDROCK_MODEL_ID` | Bedrock モデルID | 環境変数 |
+
+### B.3 AgentCore設定
+
+| 名前 | 説明 | 保存場所 |
+|------|------|---------|
+| `AGENTCORE_MEMORY_ID` | AgentCore Memory リソースID | 環境変数 |
+| `AGENTCORE_MEMORY_STRATEGY_ID` | Memory Strategy ID | 環境変数 |
+| `SCHEDULE_NAME` | EventBridge スケジュール名 | 環境変数 |
+| `SCHEDULE_GROUP_NAME` | EventBridge スケジュールグループ | 環境変数 |
+| `SNS_TOPIC_ARN` | 通知用SNSトピックARN | 環境変数 |
+
+### B.4 Observability設定
+
+| 名前 | 説明 | 保存場所 |
+|------|------|---------|
+| `AGENT_OBSERVABILITY_ENABLED` | Observability有効化フラグ | 環境変数 |
+| `OTEL_PYTHON_DISTRO` | OTEL Python Distro（`aws_distro`） | 環境変数 |
+| `OTEL_PYTHON_CONFIGURATOR` | OTEL Configurator（`aws_configurator`） | 環境変数 |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | OTEL Protocol（`http/protobuf`） | 環境変数 |
+| `OTEL_TRACES_EXPORTER` | Traces Exporter（`otlp`） | 環境変数 |
+| `OTEL_RESOURCE_ATTRIBUTES` | サービス名等のリソース属性 | 環境変数 |
