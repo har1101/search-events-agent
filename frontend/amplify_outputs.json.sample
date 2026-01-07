@@ -1,0 +1,9 @@
+{
+  "$schema": "https://raw.githubusercontent.com/aws-amplify/amplify-backend/main/packages/client-config/src/client-config-schema/schema_v1.json",
+  "version": "1",
+  "auth": {
+    "user_pool_id": "ap-northeast-1_XXXXXXXXX",
+    "aws_region": "ap-northeast-1",
+    "user_pool_client_id": "xxxxxxxxxxxxxxxxxxxxxxxxxx"
+  }
+}
