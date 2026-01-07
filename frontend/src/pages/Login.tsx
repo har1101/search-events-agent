@@ -15,7 +15,18 @@
 
 import { Authenticator } from "@aws-amplify/ui-react";
 import "@aws-amplify/ui-react/styles.css";
-import { Navigate } from "react-router-dom";
+import { Navigate, useLocation } from "react-router-dom";
+
+/**
+ * ログイン前にアクセスしようとしたページの情報を保持する型
+ * ProtectedRoute から渡される location state の型定義
+ */
+interface LocationState {
+  /** リダイレクト元のパス情報 */
+  readonly from?: {
+    readonly pathname: string;
+  };
+}
 
 interface LoginProps {
   /** 認証後に表示する子コンポーネント（省略時はダッシュボードへリダイレクト） */
@@ -27,14 +38,24 @@ interface LoginProps {
  *
  * 認証済みの場合:
  * - children が渡されていれば、それを表示
- * - children がなければ、ダッシュボード（/）へリダイレクト
+ * - children がなければ、元々アクセスしようとしていたページ（または ダッシュボード）へリダイレクト
  *
  * 未認証の場合:
  * - Authenticator コンポーネントがサインインフォームを表示
  *
+ * レビュー指摘対応: ログイン後のリダイレクト先を元のページに戻す
+ * 理由: ProtectedRoute から渡される location.state.from を使用して、
+ *       認証前にアクセスしようとしていたページに戻ることで、UXを向上させる
+ *
  * @param children - 認証後に表示するコンテンツ
  */
 export function Login({ children }: LoginProps): JSX.Element {
+  // レビュー指摘対応: useLocation を使用して、リダイレクト元のパス情報を取得
+  const location = useLocation();
+  const state = location.state as LocationState | null;
+  // リダイレクト先を決定: state.from があればそのパス、なければダッシュボード
+  const redirectTo = state?.from?.pathname ?? "/";
+
   return (
     <div
       style={{
@@ -52,8 +73,8 @@ export function Login({ children }: LoginProps): JSX.Element {
           if (children) {
             return <>{children}</>;
           }
-          // children がない場合はダッシュボードへリダイレクト
-          return <Navigate to="/" replace />;
+          // レビュー指摘対応: 元々アクセスしようとしていたページにリダイレクト
+          return <Navigate to={redirectTo} replace />;
         }
         // 未認証の場合は Authenticator が自動的にサインインフォームを表示
         // （この return は Authenticator の仕様上必要だが、実際には到達しない）

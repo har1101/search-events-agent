@@ -34,13 +34,24 @@ async function configureAndRender() {
     // ファイルが存在しない場合は catch ブロックで処理
     const outputs = await import("../amplify_outputs.json");
     Amplify.configure(outputs.default);
-  } catch {
-    // 開発初期やファイル生成前の状態では警告のみ出力
-    // `npx ampx sandbox` を実行すると自動生成される
-    console.warn(
-      "amplify_outputs.json が見つかりません。" +
-        "'npx ampx sandbox' を実行して生成してください。"
-    );
+  } catch (error) {
+    // レビュー指摘対応: モジュール未発見エラーとその他のエラーを区別
+    // 理由: JSON解析エラーやネットワークエラーなど、実際の問題を検出するため
+    const isModuleNotFound =
+      error instanceof Error && error.message.includes("Cannot find module");
+
+    if (isModuleNotFound) {
+      // 開発初期やファイル生成前の状態では警告のみ出力
+      // `npx ampx sandbox` を実行すると自動生成される
+      console.warn(
+        "amplify_outputs.json が見つかりません。" +
+          "'npx ampx sandbox' を実行して生成してください。"
+      );
+    } else {
+      // その他のエラー（JSON解析エラーなど）は再スローして問題を検出
+      console.error("Amplify設定の読み込みに失敗しました:", error);
+      throw error;
+    }
   }
 
   // React アプリケーションを #root 要素にマウント
@@ -58,5 +69,26 @@ async function configureAndRender() {
   );
 }
 
+// レビュー指摘対応: 未処理のPromise拒否をグローバルでハンドリング
+// 理由: 非同期処理での予期しないエラーがサイレントにクラッシュするのを防ぐ
+window.addEventListener("unhandledrejection", (event) => {
+  console.error("未処理のPromise拒否:", event.reason);
+});
+
 // アプリケーション起動
-configureAndRender();
+// レビュー指摘対応: configureAndRender の呼び出しにエラーハンドリングを追加
+// 理由: 起動時のエラーをログに記録し、ユーザーにフィードバックを提供する
+configureAndRender().catch((error) => {
+  console.error("アプリケーション起動エラー:", error);
+  // フォールバックUIを表示
+  const rootElement = document.getElementById("root");
+  if (rootElement) {
+    rootElement.innerHTML = `
+      <div style="padding: 20px; text-align: center; font-family: sans-serif;">
+        <h1>アプリケーションの起動に失敗しました</h1>
+        <p>ページを再読み込みするか、しばらく経ってからお試しください。</p>
+        <button onclick="window.location.reload()">再読み込み</button>
+      </div>
+    `;
+  }
+});

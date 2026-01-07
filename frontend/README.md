@@ -35,7 +35,7 @@ npm run preview  # 本番ビルドをプレビュー
 
 ## プロジェクト構成
 
-```
+```text
 frontend/
 ├── amplify/                 # Amplify Gen2 バックエンド設定
 │   ├── auth/
