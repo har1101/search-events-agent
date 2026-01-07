@@ -1,2 +1,5 @@
 .DS_Store
 .mcp.json
+.claude/*
+.github/*
+*.sh
