@@ -41,7 +41,11 @@ export function Dashboard(): JSX.Element {
         }}
       >
         <h1>ダッシュボード</h1>
+        {/* CodeRabbit指摘対応: type="button" を明示的に指定 */}
+        {/* 理由: フォーム内でなくても、ボタンのデフォルトタイプは "submit" のため、 */}
+        {/*       意図しないフォーム送信を防ぐために明示的に "button" を指定する */}
         <button
+          type="button"
           onClick={signOut}
           style={{
             padding: "8px 16px",

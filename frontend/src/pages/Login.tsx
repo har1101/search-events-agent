@@ -34,6 +34,67 @@ interface LoginProps {
 }
 
 /**
+ * リダイレクトパスを検証・正規化する
+ *
+ * CodeRabbit指摘対応: オープンリダイレクト脆弱性の防止
+ * 理由: 外部URLや不正なパスへのリダイレクトを防ぐため、
+ *       パスが相対パス（/で始まる）かつ安全な形式であることを検証する
+ *
+ * CodeRabbit追加指摘対応: 多重エンコードバイパスの防止
+ * 理由: 1回のデコードでは %252F%252Fevil.com のような多重エンコードを
+ *       検出できないため、繰り返しデコードして最終的な値を検証する
+ *
+ * @param path - 検証するパス
+ * @returns 安全なパス、または不正な場合はデフォルトパス "/"
+ */
+function validateRedirectPath(path: string | undefined): string {
+  // パスが未定義または空の場合はデフォルトに
+  if (!path) {
+    return "/";
+  }
+
+  // 相対パスのみ許可（/で始まる）
+  // // で始まるプロトコル相対URLは拒否（例: //evil.com）
+  if (!path.startsWith("/") || path.startsWith("//")) {
+    return "/";
+  }
+
+  // 多重エンコードバイパス対策: 繰り返しデコードして最終的な値を検証
+  // 最大5回まで（無限ループ防止）
+  const MAX_DECODE_ITERATIONS = 5;
+  let decoded = path;
+
+  try {
+    for (let i = 0; i < MAX_DECODE_ITERATIONS; i++) {
+      const newDecoded = decodeURIComponent(decoded);
+      // デコード結果が変わらなければ安定したのでループ終了
+      if (newDecoded === decoded) {
+        break;
+      }
+      decoded = newDecoded;
+    }
+  } catch {
+    // デコード失敗時はデフォルトに
+    return "/";
+  }
+
+  // 最終デコード結果を検証
+  // // で始まるプロトコル相対URL、または / で始まらない場合は拒否
+  if (!decoded.startsWith("/") || decoded.startsWith("//")) {
+    return "/";
+  }
+
+  // プロトコルを含むURLパターンを拒否（例: /http://evil.com）
+  if (/^\/[a-zA-Z][a-zA-Z0-9+.-]*:/.test(decoded)) {
+    return "/";
+  }
+
+  // CodeRabbit指摘対応: 検証済みのデコード結果を返す
+  // 理由: 元のpathではなくデコード済みの安全な値を使用する
+  return decoded;
+}
+
+/**
  * ログインページ
  *
  * 認証済みの場合:
@@ -53,8 +114,8 @@ export function Login({ children }: LoginProps): JSX.Element {
   // レビュー指摘対応: useLocation を使用して、リダイレクト元のパス情報を取得
   const location = useLocation();
   const state = location.state as LocationState | null;
-  // リダイレクト先を決定: state.from があればそのパス、なければダッシュボード
-  const redirectTo = state?.from?.pathname ?? "/";
+  // CodeRabbit指摘対応: リダイレクト先を検証してオープンリダイレクト攻撃を防止
+  const redirectTo = validateRedirectPath(state?.from?.pathname);
 
   return (
     <div

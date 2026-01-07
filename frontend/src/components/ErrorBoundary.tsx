@@ -23,6 +23,12 @@ interface ErrorBoundaryState {
   hasError: boolean;
   /** 発生したエラー */
   error: Error | null;
+  /**
+   * CodeRabbit指摘対応: リトライ時に子コンポーネントを再マウントするためのキー
+   * 理由: 状態をリセットするだけでは子コンポーネントの内部状態が残る可能性があるため、
+   *       キーを変更することで強制的に再マウントさせる
+   */
+  retryKey: number;
 }
 
 /**
@@ -34,14 +40,14 @@ interface ErrorBoundaryState {
 class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
   constructor(props: ErrorBoundaryProps) {
     super(props);
-    this.state = { hasError: false, error: null };
+    this.state = { hasError: false, error: null, retryKey: 0 };
   }
 
   /**
    * エラー発生時に状態を更新するための静的メソッド
    * このメソッドでエラー状態を更新すると、再レンダリング時にフォールバックUIが表示される
    */
-  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
+  static getDerivedStateFromError(error: Error): Partial<ErrorBoundaryState> {
     return { hasError: true, error };
   }
 
@@ -57,9 +63,16 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
 
   /**
    * エラー状態をリセットして再試行するハンドラ
+   *
+   * CodeRabbit指摘対応: retryKey をインクリメントして子コンポーネントを再マウント
+   * 理由: 状態をリセットするだけでは子コンポーネントの破損した内部状態が残る可能性がある
    */
   handleRetry = (): void => {
-    this.setState({ hasError: false, error: null });
+    this.setState((prevState) => ({
+      hasError: false,
+      error: null,
+      retryKey: prevState.retryKey + 1,
+    }));
   };
 
   render(): ReactNode {
@@ -135,7 +148,9 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
       );
     }
 
-    return this.props.children;
+    // CodeRabbit指摘対応: key を使用してリトライ時に子コンポーネントを再マウント
+    // Fragment に key を設定することで、キーが変わると子コンポーネントが再生成される
+    return <div key={this.state.retryKey}>{this.props.children}</div>;
   }
 }
 
